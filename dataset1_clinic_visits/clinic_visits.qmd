@@ -1,0 +1,149 @@
+---
+title: "Project 2 — Dataset 1: Community Clinic Visits"
+author: "YOUR NAME HERE"
+date: today
+format:
+  html:
+    toc: true
+    code-fold: true
+    theme: flatly
+execute:
+  echo: true
+  warning: false
+---
+
+## Introduction
+
+For this dataset I'm using a table my classmate Renee Watson posted on the Week 5 Discussion 5A board. It's a made-up dataset of monthly patient visits for 10 community health clinics through 2025, with one row per clinic and one column per month. Renee built it herself for the discussion, so it's not real clinic data, just a realistic stand-in to practice tidying on.
+
+## Approach
+
+I'll start by putting Renee's table into a CSV exactly the way she posted it, months across the top, so the untidy version is preserved. Then I'll read that file into R and reshape it with `pivot_longer()` so each row is one clinic in one month. Along the way I'll clean up the column names and check whether there's any missing data to deal with. Once the data is tidy, I'll look at which clinics get the most visits, how visit volume changes across the year, and which clinics grew the most from January to December, backing it up with a couple of charts.
+
+## Data source
+
+Posted by Renee Watson on the Week 5 Discussion 5A board (DATA 607, Fall 2026). It's a fictional dataset she created for the discussion post — patient visits are made up, not collected from any real clinic.
+
+## Data structure before tidying
+
+The raw file has 10 rows (one per clinic) and 13 columns: `Clinic`, plus one column for each month, `Jan` through `Dec`. It's wide because the month is baked into the column name instead of being its own variable. Here's what it looks like:
+
+```{r load}
+library(tidyverse)
+
+url <- "https://raw.githubusercontent.com/amine-souissi0/data607-project2/main/dataset1_clinic_visits/data/clinic_visits.csv"
+raw <- read_csv(url, show_col_types = FALSE)
+
+raw
+```
+
+10 rows and 13 columns, as expected, and every cell already has a number in it — no blanks in this one, which I'll confirm below rather than just assume.
+
+## Transformation steps
+
+```{r tidy}
+tidy <- raw |>
+  rename(clinic = Clinic) |>
+  pivot_longer(
+    cols      = -clinic,
+    names_to  = "month",
+    values_to = "visits"
+  ) |>
+  mutate(month = factor(month, levels = month.abb, ordered = TRUE))
+
+# Missing-data check. There aren't any here, but I still write the check
+# instead of assuming, and drop_na() would catch it if a future version
+# of the source table left a cell blank.
+n_missing <- sum(is.na(tidy$visits))
+tidy <- tidy |> drop_na(visits)
+
+tidy
+```
+
+What I did here:
+
+- `rename(clinic = Clinic)` just lowercases the id column so `clinic`, `month`, and `visits` all follow the same naming style.
+- `pivot_longer()` is the actual wide-to-long step. `cols = -clinic` means "reshape every column except clinic," and the twelve month columns turn into two columns: `month` (which month it was) and `visits` (the number that used to sit in that cell).
+- `factor(month, levels = month.abb, ordered = TRUE)` turns the month text into an ordered category so R knows Jan comes before Feb and so on, instead of sorting them alphabetically.
+- The missing-data step is short because there was nothing to fix, but I check for it on purpose (`n_missing`) rather than skip the step because it "looked fine."
+
+```{r check}
+n_missing
+nrow(tidy)
+sum(tidy$visits)
+```
+
+That's 0 missing values, 120 rows (10 clinics × 12 months, as it should be), and 32,186 total visits across the whole table — I checked that number by hand-summing the raw table too, so I know the reshape didn't drop or duplicate anything.
+
+## Analytical methods
+
+Three things, all computed off the tidy long table, never the wide one:
+
+1. **Total visits per clinic** — sum of `visits` grouped by `clinic`, to see clinic size.
+2. **Monthly pattern** — average visits per month across all 10 clinics, to see the shape of the year.
+3. **Growth from January to December** — the difference (and percent change) between each clinic's Dec and Jan numbers, to see who grew the most.
+
+```{r totals}
+by_clinic <- tidy |>
+  summarise(total_visits = sum(visits), .by = clinic) |>
+  arrange(desc(total_visits))
+
+by_clinic |>
+  rename(Clinic = clinic, `Total visits (2025)` = total_visits) |>
+  knitr::kable()
+
+ggplot(by_clinic, aes(x = reorder(clinic, total_visits), y = total_visits)) +
+  geom_col(fill = "#1F4E79") +
+  coord_flip() +
+  labs(title = "Total patient visits by clinic, 2025",
+       x = NULL, y = "Total visits") +
+  theme_minimal()
+```
+
+Central Community Health Center sees the most visits overall (4,299 for the year), and Eastside Family Clinic the fewest (2,319) — a pretty wide range for a set of clinics that all appear to be roughly the same kind of practice.
+
+```{r monthly}
+monthly <- tidy |>
+  summarise(avg_visits = mean(visits), .by = month) |>
+  arrange(month)
+
+ggplot(monthly, aes(x = month, y = avg_visits, group = 1)) +
+  geom_line(color = "#1F4E79", linewidth = 1) +
+  geom_point(color = "#1F4E79") +
+  labs(title = "Average visits per month, across all 10 clinics",
+       x = "Month", y = "Average visits") +
+  theme_minimal()
+```
+
+Visits climb steadily basically every month, from an average of about 224 in January up to about 314 in December. Since this is a made-up dataset, I won't pretend there's a real medical reason behind it, but the shape does look like the kind of pattern you'd expect if cold-and-flu season and holiday travel were pushing more people into clinics toward the end of the year.
+
+```{r growth}
+growth <- tidy |>
+  filter(month %in% c("Jan", "Dec")) |>
+  pivot_wider(names_from = month, values_from = visits) |>
+  mutate(change      = Dec - Jan,
+         pct_change  = round(100 * change / Jan, 1)) |>
+  arrange(desc(pct_change))
+
+growth |>
+  rename(Clinic = clinic, `Jan visits` = Jan, `Dec visits` = Dec,
+         `Change` = change, `% change` = pct_change) |>
+  knitr::kable()
+```
+
+By raw numbers, Central, Westview, and Lakeside all added the most visits (+105 each). But by percentage, Hillcrest Community Clinic actually grew the fastest (+51.5%), even though it's one of the smaller clinics — it just started from a lower base, so the same kind of growth looks bigger in relative terms.
+
+## Conclusions
+
+<!-- TODO (student): write this in your own words. Prompts: -->
+
+- Which clinic would you flag as needing more staff going into December, and why — the one with the most total visits, or the one growing the fastest?
+- Why does ranking by raw growth (+105 visits) give a different "winner" than ranking by percent growth (+51.5%)? Which one matters more depending on the question you're asking?
+- Since this is a fictional dataset, what would you want to check before trusting a seasonal pattern like this in real clinic data (sample size, multiple years, etc.)?
+- How would you extend this — comparing against actual local health data, breaking visits down by reason, or something else?
+
+## AI Use
+
+Anthropic. (2026). *Claude Sonnet 5* [Large language model]. https://claude.ai. Accessed September 30, 2026.
+
+I used Claude to help plan the tidying pipeline, draft the R code for each step, and check the totals and percentages independently before trusting them. I reviewed the code and can explain what each step does.

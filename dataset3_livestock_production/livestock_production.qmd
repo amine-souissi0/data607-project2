@@ -1,0 +1,162 @@
+---
+title: "Project 2 — Dataset 3: Livestock Production (FAOSTAT)"
+author: "YOUR NAME HERE"
+date: today
+format:
+  html:
+    toc: true
+    code-fold: true
+    theme: flatly
+execute:
+  echo: true
+  warning: false
+---
+
+## Introduction
+
+My classmate Bowen Cho posted about using FAOSTAT's livestock production data on the Week 5 Discussion 5A board — he'd worked with it years ago using base R loops and wanted to redo it with tidyverse. He didn't attach a file, so I pulled real data from FAOSTAT's own bulk download myself, since it's the same public source he named.
+
+## Approach
+
+FAOSTAT's full livestock file covers every country and product since 1961, which is way more than I need, so I'll first cut it down to a manageable slice — 8 countries, 4 livestock products, years 2000 through 2023 — and save that as the raw wide CSV, keeping the year-by-column layout FAOSTAT itself uses. Then I'll bring it into R and reshape the year columns into a proper `year` variable with `pivot_longer()`, dealing honestly with the cells FAOSTAT never reported a number for. Since Bowen's whole point was comparing an old, slow way of doing this to a modern one, I'll also time a base R loop against the tidyverse version, the way he described. Once it's tidy, I'll look at how production of each product changed from 2000 to 2023 and which country produces the most of any one product.
+
+## Data source
+
+FAO FAOSTAT, "Crops and Livestock Products" domain, bulk download: <https://www.fao.org/faostat/en/#data/QCL>. I downloaded the full bulk file (`Production_Crops_Livestock_E_All_Data.zip`, updated December 2025) and filtered it down to the **Production** element (in tonnes) for four livestock products — cattle meat, chicken meat, cow milk, and hen eggs — across eight countries (Australia, Brazil, China, France, Germany, India, Kenya, and the United States), for the years 2000–2023.
+
+## Data structure before tidying
+
+The raw file has 32 rows (8 countries × 4 products) and 26 columns: `Country`, `Item`, and then one column per year from `2000` to `2023`, holding the production quantity in tonnes. It's wide because each year is a separate column instead of `year` being its own variable.
+
+```{r load}
+library(tidyverse)
+
+url <- "https://raw.githubusercontent.com/amine-souissi0/data607-project2/main/dataset3_livestock_production/data/livestock_production.csv"
+raw <- read_csv(url, show_col_types = FALSE)
+
+raw |> select(Country, Item, `2000`, `2010`, `2023`)
+```
+
+32 rows and 26 columns, as expected — a mix of countries and products, with some cells already blank, which I'll deal with in the reshape below rather than pretend they're not there.
+
+## Transformation steps
+
+```{r tidy}
+tidy <- raw |>
+  rename_with(tolower) |>
+  pivot_longer(
+    cols      = -c(country, item),
+    names_to  = "year",
+    values_to = "tonnes"
+  ) |>
+  mutate(year = as.integer(year))
+
+tidy
+```
+
+- `rename_with(tolower)` lowercases `Country` and `Item` so every column name in the tidy table is lowercase, matching the rest of the project.
+- `pivot_longer()` is the reshape: the 24 year columns collapse into two columns, `year` (which year it is) and `tonnes` (the production number for that country, product, and year).
+- `as.integer(year)` turns the year, which comes out of the column names as text, back into a real number so it sorts and plots correctly.
+
+```{r missing}
+n_missing <- sum(is.na(tidy$tonnes))
+pct_missing <- round(100 * n_missing / nrow(tidy), 1)
+n_missing
+pct_missing
+```
+
+30 of 768 rows (about 3.9%) have no number — FAOSTAT just never received a report for that country, product, and year. **My decision:** I'm leaving these as `NA` instead of filling them with 0. A missing report isn't the same thing as zero production, and turning it into 0 would make it look like, say, Kenya produced no chicken meat some year, when really nobody's data just came in. Any totals below use `na.rm = TRUE` so a missing year doesn't silently zero out a country's whole total.
+
+### A detour: comparing the old way to the new way
+
+Bowen's post mentioned he used to reshape FAOSTAT data with base R loops, so here's that comparison — a loop-based reshape against `pivot_longer()`, both doing the exact same wide-to-long job, timed with `system.time()`.
+
+```{r timing}
+base_r_reshape <- function(df) {
+  year_cols <- setdiff(names(df), c("Country", "Item"))
+  out <- data.frame()
+  for (i in seq_len(nrow(df))) {
+    for (yr in year_cols) {
+      out <- rbind(out, data.frame(
+        country = df$Country[i],
+        item    = df$Item[i],
+        year    = as.integer(yr),
+        tonnes  = df[[yr]][i]
+      ))
+    }
+  }
+  out
+}
+
+time_base_r    <- system.time(base_r_reshape(raw))
+time_tidyverse <- system.time(
+  raw |> rename_with(tolower) |>
+    pivot_longer(cols = -c(country, item), names_to = "year", values_to = "tonnes") |>
+    mutate(year = as.integer(year))
+)
+
+tibble(
+  Approach     = c("Base R loop (rbind row by row)", "tidyverse pivot_longer()"),
+  `Time (sec)` = c(time_base_r[["elapsed"]], time_tidyverse[["elapsed"]])
+) |> knitr::kable()
+```
+
+The loop rebuilds the data frame one row at a time with `rbind()`, which is exactly the kind of thing that gets painfully slow as a dataset grows, since R has to copy the whole (bigger and bigger) table on every single iteration. `pivot_longer()` does the whole reshape in one vectorized pass. At 768 rows the difference is small in absolute terms, but the *shape* of the slowdown is the real lesson — this loop gets dramatically worse on a bigger slice of FAOSTAT, while `pivot_longer()` barely notices.
+
+## Analytical methods
+
+Two questions, both from the tidy long table:
+
+1. **2000 vs. 2023** — how much did production of each livestock product change across these 8 countries, in percent.
+2. **Who produces the most** — the single largest country/product combination in 2023.
+
+```{r change}
+change <- tidy |>
+  filter(year %in% c(2000, 2023)) |>
+  pivot_wider(names_from = year, values_from = tonnes, names_prefix = "y") |>
+  summarise(total_2000 = sum(y2000, na.rm = TRUE),
+            total_2023 = sum(y2023, na.rm = TRUE),
+            .by = item) |>
+  mutate(pct_change = round(100 * (total_2023 - total_2000) / total_2000, 1)) |>
+  arrange(desc(pct_change))
+
+change |>
+  rename(Product = item, `2000 (t)` = total_2000, `2023 (t)` = total_2023, `% change` = pct_change) |>
+  knitr::kable()
+
+ggplot(change, aes(x = reorder(item, pct_change), y = pct_change)) +
+  geom_col(fill = "#1F4E79") +
+  coord_flip() +
+  labs(title = "Change in production, 2000 to 2023 (8-country sample)",
+       x = NULL, y = "% change") +
+  theme_minimal()
+```
+
+Across this set of countries, cow milk and chicken meat nearly doubled (+87.5% and +78.2%), hen eggs grew a lot too (+66.8%), and cattle meat grew the least by far (+15.9%). That lines up with a trend that shows up a lot in real agricultural data — dairy and poultry have scaled up much faster than beef over the past couple of decades, mostly because chickens and dairy cows convert feed into food a lot more efficiently.
+
+```{r biggest}
+biggest <- tidy |>
+  filter(year == 2023) |>
+  slice_max(tonnes, n = 5)
+
+biggest |>
+  rename(Country = country, Product = item, Year = year, Tonnes = tonnes) |>
+  knitr::kable()
+```
+
+India's cow milk production is the standout number here — over 127 million tonnes in 2023, more than double the next-largest figure in this sample. That's not a fluke; India really is the world's largest milk producer by a wide margin.
+
+## Conclusions
+
+<!-- TODO (student): write this in your own words. Prompts: -->
+
+- Why did dairy and poultry grow so much faster than beef in this sample? Does that match what you already knew about these industries?
+- What does the `system.time()` comparison actually prove, and what would you expect to happen if you ran both approaches on the full FAOSTAT file instead of this 32-row slice?
+- Why keep missing values as `NA` instead of filling them with 0 in a production dataset like this one?
+- How would you extend this — more countries, normalizing by population, or comparing against crop production instead of livestock?
+
+## AI Use
+
+Anthropic. (2026). *Claude Sonnet 5* [Large language model]. https://claude.ai. Accessed September 30, 2026.
+
+I used Claude to help plan the tidying pipeline, pull and filter the real FAOSTAT data down to a manageable size, draft the R code for each step, and check the totals and percentages independently before trusting them. I reviewed the code and can explain what each step does.
